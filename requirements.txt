@@ -1,0 +1,7 @@
+streamlit>=1.20
+pandas
+numpy
+torch
+tqdm
+sentence-transformers>=2.2.2
+scikit-learn
