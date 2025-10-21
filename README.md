@@ -2,7 +2,7 @@
 
 ## Описание проекта
 
-Этот проект представляет собой **систему рекомендаций книг**, основанную на **текстовых описаниях**, **жанрах**, **авторах** и **рейтингах пользователей**.  
+Этот проект представляет собой **систему рекомендаций книг**, основанную на **жанрах книг**, **авторах** и **предпочтениях пользователей**.  
 Он использует предобученную модель предложений [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) для вычисления эмбеддингов книг и небольшую нейросеть (персонализированную "голову"), которая адаптируется под вкусы каждого пользователя.
 
 Система позволяет:
@@ -51,11 +51,7 @@ pip install -r requirements.txt
 
 ## Формат данных
 
-Файл `data/goodreads_data.csv` должен содержать следующие столбцы:
-
-| Book | Author | Description | Genres | Avg_Rating | Num_Ratings | URL |
-|------|---------|------------|------------|----------|------|-----------|
-| To Kill a Mockingbird | Harper Lee | The unforgettable novel of a childhood... | "['Classics', 'Fiction', ...]" | 4.20 | "5,691,311" | https://www.goodreads.com/book/show/2657.To_Kill_a_Mockingbird |
+Файл `goodreads_data.csv` был взят с [`Kaggle`](https://www.kaggle.com/datasets/dylanjcastillo/7k-books-with-metadata)
 
 Файл `data/books.csv`, который создаётся после предобработки исходного файла, будет содержать следующие столбцы:
 
