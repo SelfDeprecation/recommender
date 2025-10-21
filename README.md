@@ -12,26 +12,28 @@
 
 ## Архитектура проекта
 
-📦 books_recommender/
+```bash
+📚 recommender/
 ├── 📁 data/
-│   ├── goodreads_data.csv          # Исходные данные о книгах
-│   ├── book_embeddings.npz         # Сохранённые эмбеддинги книг
-│   ├── books.csv                   # Предобработанный датасет
-│   └── head_personalized.pt        # Индивидуальная "голова" модели
+│   ├── goodreads_data.csv        # Исходные данные о книгах
+│   ├── book_embeddings.npz       # Сохранённые эмбеддинги книг
+│   ├── books.csv                 # Предобработанный датасет
+│   └── head_personalized.pt      # Индивидуальная "голова" модели
 │
 ├── 📁 src/
-│   ├── model.py                    # Архитектура модели
-│   ├── train_utils.py              # Утилиты для обучения
-│   ├── recommend.py                # Генерация рекомендаций
-│   ├── data.py                     # Парсинг жанров
-│   ├── app.py                      # Streamlit-приложение
-│   ├── train.py                    # CLI для обучения
-│   └── preprocess.py               # Предобработка данных
+│   ├── model.py                  # Архитектура модели
+│   ├── train_utils.py            # Утилиты для обучения
+│   ├── recommend.py              # Генерация рекомендаций
+│   ├── data.py                   # Парсинг жанров
+│   ├── app.py                    # Streamlit-приложение
+│   ├── train.py                  # CLI для обучения
+│   └── preprocess.py             # Предобработка данных
 │
-├── 📄 .gitignore
-├── 📄 LICENSE                      # MIT License
-├── 📄 README.md                    # Документация проекта
-└── 📄 requirements.txt             # Зависимости Python
+├── .gitignore
+├── LICENSE                       # MIT License
+├── README.md                     # Документация проекта
+└── requirements.txt              # Зависимости Python
+```
 
 ---
 
