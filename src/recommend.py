@@ -36,8 +36,14 @@ def recommend_topk_from_liked(df, liked_titles, top_k=10, model_name=None, emb_m
             head = head.to(device)
             head.eval()
             preds_head = head(all_emb).detach()
-            sim_norm = (sim_score - sim_score.mean()) / (sim_score.std() + 1e-8)
-            head_norm = (preds_head - preds_head.mean()) / (preds_head.std() + 1e-8)
+            
+            sim_mean = sim_score.mean().item()
+            sim_std = sim_score.std().item() if sim_score.std().numel() > 0 else 1.0
+            head_mean = preds_head.mean().item()
+            head_std = preds_head.std().item() if preds_head.std().numel() > 0 else 1.0
+            
+            sim_norm = (sim_score - sim_mean) / (sim_std + 1e-8)
+            head_norm = (preds_head - head_mean) / (head_std + 1e-8)
             combined = 0.5 * sim_norm + 0.5 * head_norm
             scores = combined.cpu().numpy()
         else:
@@ -54,6 +60,7 @@ def recommend_topk_from_liked(df, liked_titles, top_k=10, model_name=None, emb_m
     recs = filtered_df.iloc[top_idx].copy()
     recs['score'] = filtered_scores[top_idx]
     return recs[['Book', 'Author', 'Genres', 'Avg_Rating', 'score']].to_dict('records')
+
 
 def load_embeddings_if_exists(path="data/book_embeddings.npz"):
     import os
