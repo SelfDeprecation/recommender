@@ -30,5 +30,7 @@ def load_books_dataset(path="data/books.csv"):
         if c not in df.columns:
             raise ValueError(f"Missing column in CSV: {c}")
     df = df.dropna(subset=required).reset_index(drop=True)
-    df['Genres_parsed'] = df['Genres'].apply(parse_genres)
+    df['Genres'] = df['Genres'].apply(parse_genres)
+    if "Unnamed: 0" in df.columns:
+        df = df.drop(columns=["Unnamed: 0"])
     return df

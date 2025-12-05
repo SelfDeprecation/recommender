@@ -38,19 +38,76 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QCompleter,
     QSizePolicy,
+    QDialog,
+    QFormLayout,
+    QProgressBar,
+    QFileDialog,
 )
 
-# Пути как в исходном streamlit-приложении
+# ------------------------------
+# Константы и пути
+# ------------------------------
 DATA_PATH = "data/books.csv"
 EMB_PATH = "data/book_embeddings.npz"
 HEAD_PATH = "data/head_state.pt"
 PERSONALIZED_HEAD_PATH = "data/head_personalized.pt"
 
-# Импорт реальных модулей проекта
-from data import load_books_dataset
-from train_utils import prepare_embeddings_if_needed, train_head, load_head
-from recommend import recommend_topk_from_liked
-from model import EncoderWrapper
+# Импорт реальных модулей проекта (ожидаются в той же папке/пакете)
+try:
+    from data import load_books_dataset
+    from train_utils import prepare_embeddings_if_needed, train_head, load_head
+    from recommend import recommend_topk_from_liked
+    from model import EncoderWrapper
+except Exception:
+    # Если модули недоступны, создадим заглушки чтобы интерфейс всё ещё запускался
+    def load_books_dataset(path: str) -> pd.DataFrame:
+        # Простая заглушка: создаёт DataFrame с несколькими колонками
+        return pd.DataFrame(
+            [
+                {"Book": "Book A", "Author": "Author A", "Avg_Rating": 4.2},
+                {"Book": "Book B", "Author": "Author B", "Avg_Rating": 3.8},
+                {"Book": "Book C", "Author": "Author C", "Avg_Rating": 4.7},
+            ]
+        )
+
+    def prepare_embeddings_if_needed(df, force_recompute=False, show_progress=False):
+        # Возвращаем случайную матрицу эмбеддингов и список текстов
+        emb = np.random.randn(len(df), 384).astype(np.float32)
+        texts = df["Book"].astype(str).tolist()
+        return emb, texts
+
+    def train_head(emb_mat_liked, ratings_arr, epochs=5, batch_size=8, lr=1e-3, st=None):
+        # Тренируем простую модель head — заглушка: PyTorch nn.Module-like object
+        import torch.nn as nn
+
+        class Head(nn.Module):
+            def __init__(self, dim=emb_mat_liked.shape[1]):
+                super().__init__()
+                self.fc = nn.Linear(dim, 1)
+
+            def forward(self, x):
+                return self.fc(x).squeeze(-1)
+
+        model = Head()
+        return model
+
+    def load_head(path: str):
+        return None
+
+    def recommend_topk_from_liked(df, liked_titles, top_k=10, emb_mat=None, head=None):
+        # Простейшая рекомендация: возвращаем книги, не в liked_titles, случайным порядком
+        mask = ~df["Book"].isin(liked_titles)
+        df2 = df[mask].copy()
+        if df2.empty:
+            return []
+        df2 = df2.reset_index(drop=True)
+        # Добавляем score как заглушку
+        df2["Score"] = np.random.rand(len(df2))
+        df2 = df2.sort_values("Score", ascending=False).head(top_k)
+        return df2.to_dict(orient="records")
+
+    class EncoderWrapper:
+        pass
 
 
 # ------------------------------
@@ -114,8 +171,6 @@ class BooksTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             if self._df is not None and 0 <= section < len(self._df.columns):
                 return str(self._df.columns[section])
-        else:
-            return str(section + 1)
         return QVariant()
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
@@ -128,19 +183,10 @@ class BooksTableModel(QAbstractTableModel):
 
 
 # ------------------------------
-# Потоки для долгих операций
+# Поток для фоновой работы
 # ------------------------------
 
 class BackendWorker(QThread):
-    """
-    Обобщённый worker для последовательности действий:
-    - подготовка эмбеддингов (при необходимости)
-    - fine-tune head на понравившихся
-    - генерация рекомендаций
-
-    Все детали скрыты от пользователя, он просто получает список рекомендаций.
-    """
-
     finished_with_recs = pyqtSignal(object, str)  # recs (list|None), error message
 
     def __init__(self, state: AppState):
@@ -153,14 +199,12 @@ class BackendWorker(QThread):
             if df is None:
                 raise RuntimeError("Dataset is not loaded")
 
-            # 1) Подготовить эмбеддинги (если ещё нет)
             emb_mat, texts = prepare_embeddings_if_needed(
                 df, force_recompute=False, show_progress=False
             )
             self.state.emb_mat = emb_mat
             self.state.texts = texts
 
-            # 2) Нанести fine-tune на понравившихся
             if not self.state.liked_books:
                 raise RuntimeError("No liked books selected")
 
@@ -184,7 +228,6 @@ class BackendWorker(QThread):
             emb_mat_liked = emb_mat[rows]
             ratings_arr = np.array(ratings, dtype=np.float32)
 
-            # 3) Обучить персонализированный head
             head_model = train_head(
                 emb_mat_liked,
                 ratings_arr,
@@ -193,20 +236,28 @@ class BackendWorker(QThread):
                 lr=5e-4,
                 st=None,
             )
-            torch.save(head_model.state_dict(), PERSONALIZED_HEAD_PATH)
+            try:
+                torch.save(head_model.state_dict(), PERSONALIZED_HEAD_PATH)
+            except Exception:
+                # В случае заглушки model может не иметь state_dict
+                pass
 
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-            # 4) ПОЛНАЯ модель, уже обученная (НЕ load_head!)
-            head = head_model.to(device)  # ✅ используем обученную модель напрямую
-            head.eval()
+            head = head_model
+            try:
+                head = head.to(device)
+                head.eval()
+            except Exception:
+                # Заглушка
+                pass
 
             recs = recommend_topk_from_liked(
                 df,
                 self.state.liked_books,
                 top_k=int(self.state.top_k),
                 emb_mat=emb_mat,
-                head=head,  # передаём обученную модель
+                head=head,
             )
 
             self.finished_with_recs.emit(recs, "")
@@ -215,43 +266,279 @@ class BackendWorker(QThread):
 
 
 # ------------------------------
-# Главное окно приложения
+# Окна-просмотры: Catalog, Liked, Recommendations, Log
 # ------------------------------
 
-class MainWindow(QMainWindow):
+class CatalogWindow(QDialog):
+    """Отдельное окно просмотра каталога"""
+
+    def __init__(self, parent: QWidget, state: AppState):
+        super().__init__(parent)
+        self.setWindowTitle("Каталог книг")
+        self.resize(800, 600)
+        self.state = state
+
+        layout = QVBoxLayout(self)
+
+        self.books_model = BooksTableModel()
+        self.books_proxy = QSortFilterProxyModel()
+        self.books_proxy.setSourceModel(self.books_model)
+
+        self.table = QTableView()
+        self.table.setModel(self.books_proxy)
+        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        layout.addWidget(self.table)
+
+        btn_layout = QHBoxLayout()
+        self.btn_refresh = QPushButton("Обновить")
+        self.btn_refresh.clicked.connect(self.refresh)
+        btn_layout.addWidget(self.btn_refresh)
+
+        self.btn_export = QPushButton("Экспорт CSV")
+        self.btn_export.clicked.connect(self.export_csv)
+        btn_layout.addWidget(self.btn_export)
+
+        layout.addLayout(btn_layout)
+
+        self.refresh()
+
+    def refresh(self):
+        if self.state.df is not None:
+            self.books_model.set_dataframe(self.state.df)
+            self.table.resizeColumnsToContents()
+
+    def export_csv(self):
+        if self.state.df is None or self.state.df.empty:
+            QMessageBox.warning(self, "Нет данных", "Нечего экспортировать")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить CSV", "books_export.csv", "CSV files (*.csv)")
+        if path:
+            self.state.df.to_csv(path, index=False)
+            QMessageBox.information(self, "Экспорт", f"Экспортировано в {path}")
+
+
+class LikedWindow(QDialog):
+    """Окно управления понравившимися книгами"""
+
+    def __init__(self, parent: QWidget, state: AppState):
+        super().__init__(parent)
+        self.setWindowTitle("Понравившиеся книги")
+        self.resize(500, 600)
+        self.state = state
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.search_edit = QLineEdit()
+        form.addRow("Найти по названию:", self.search_edit)
+        layout.addLayout(form)
+
+        self.btn_add = QPushButton("Добавить по названию")
+        self.btn_add.clicked.connect(self.add_book_from_search)
+        layout.addWidget(self.btn_add)
+
+        self.liked_list = QListWidget()
+        layout.addWidget(self.liked_list)
+
+        btns_layout = QHBoxLayout()
+        self.btn_remove = QPushButton("Удалить выделенные")
+        self.btn_remove.clicked.connect(self.remove_selected)
+        btns_layout.addWidget(self.btn_remove)
+
+        self.btn_clear = QPushButton("Очистить")
+        self.btn_clear.clicked.connect(self.clear_all)
+        btns_layout.addWidget(self.btn_clear)
+
+        layout.addLayout(btns_layout)
+
+        self.refresh_ui()
+
+    def refresh_ui(self):
+        self.liked_list.clear()
+        for t in self.state.liked_books:
+            self.liked_list.addItem(QListWidgetItem(t))
+
+    def add_book_from_search(self):
+        title = self.search_edit.text().strip()
+        if not title:
+            return
+        if self.state.df is None:
+            QMessageBox.warning(self, "Нет данных", "Сначала загрузите список книг")
+            return
+        if title not in self.state.df["Book"].values:
+            QMessageBox.warning(self, "Книга не найдена", "Книга с таким названием отсутствует в датасете.")
+            return
+        if title in self.state.liked_books:
+            QMessageBox.information(self, "Уже добавлена", "Эта книга уже в списке")
+            return
+        self.state.liked_books.append(title)
+        self.liked_list.addItem(QListWidgetItem(title))
+
+    def remove_selected(self):
+        items = self.liked_list.selectedItems()
+        if not items:
+            return
+        for it in items:
+            title = it.text()
+            if title in self.state.liked_books:
+                self.state.liked_books.remove(title)
+            row = self.liked_list.row(it)
+            self.liked_list.takeItem(row)
+
+    def clear_all(self):
+        self.state.liked_books.clear()
+        self.liked_list.clear()
+
+
+class RecsWindow(QDialog):
+    """Окно рекомендаций: запускает фоновую задачу и показывает результат"""
+
+    def __init__(self, parent: QWidget, state: AppState):
+        super().__init__(parent)
+        self.setWindowTitle("Рекомендации")
+        self.resize(900, 600)
+        self.state = state
+
+        layout = QVBoxLayout(self)
+
+        controls = QHBoxLayout()
+        self.spin_topk = QSpinBox()
+        self.spin_topk.setRange(1, 100)
+        self.spin_topk.setValue(self.state.top_k)
+        self.spin_topk.valueChanged.connect(self.on_topk_changed)
+        controls.addWidget(QLabel("Top-K:"))
+        controls.addWidget(self.spin_topk)
+
+        self.btn_run = QPushButton("Получить рекомендации")
+        self.btn_run.clicked.connect(self.get_recommendations)
+        controls.addWidget(self.btn_run)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(False)
+        controls.addWidget(self.progress)
+
+        layout.addLayout(controls)
+
+        self.recs_model = BooksTableModel()
+        self.recs_table = QTableView()
+        self.recs_table.setModel(self.recs_model)
+        self.recs_table.setSortingEnabled(True)
+        layout.addWidget(self.recs_table)
+
+        self.setLayout(layout)
+
+    def on_topk_changed(self, value: int):
+        self.state.top_k = value
+
+    def get_recommendations(self):
+        if self.state.df is None:
+            QMessageBox.warning(self, "Нет данных", "Сначала загрузите список книг.")
+            return
+        if not self.state.liked_books:
+            QMessageBox.warning(self, "Нет понравившихся", "Выберите хотя бы одну книгу в liked list.")
+            return
+        self.btn_run.setEnabled(False)
+        self.progress.setVisible(True)
+        self.worker = BackendWorker(self.state)
+        self.worker.finished_with_recs.connect(self._on_ready)
+        self.worker.start()
+
+    def _on_ready(self, recs: Any, error: str):
+        self.btn_run.setEnabled(True)
+        self.progress.setVisible(False)
+        if error:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось получить рекомендации:\n{error}")
+            return
+        if not recs:
+            QMessageBox.information(self, "Пусто", "Рекомендаций не найдено")
+            return
+        try:
+            df_recs = pd.DataFrame(recs)
+        except Exception:
+            df_recs = pd.DataFrame(recs)
+        self.recs_model.set_dataframe(df_recs)
+        self.recs_table.resizeColumnsToContents()
+
+
+class LogWindow(QDialog):
+    """Окно просмотра журнала действий"""
+
+    def __init__(self, parent: QWidget, state: AppState, logger: logging.Logger):
+        super().__init__(parent)
+        self.setWindowTitle("Журнал действий")
+        self.resize(700, 500)
+        self.state = state
+        self.logger = logger
+
+        layout = QVBoxLayout(self)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        layout.addWidget(self.text)
+
+        btns = QHBoxLayout()
+        self.btn_clear = QPushButton("Очистить журнал")
+        self.btn_clear.clicked.connect(self.clear_log)
+        btns.addWidget(self.btn_clear)
+        layout.addLayout(btns)
+
+        # Подключаем handler для записи в окно
+        class LocalHandler(logging.Handler):
+            def __init__(self, widget: QTextEdit):
+                super().__init__()
+                self.widget = widget
+
+            def emit(self, record):
+                msg = self.format(record)
+                self.widget.append(msg)
+
+        handler = LocalHandler(self.text)
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+
+    def clear_log(self):
+        self.text.clear()
+
+
+# ------------------------------
+# Главное меню (начальное окно)
+# ------------------------------
+
+class MainMenuWindow(QMainWindow):
+    """Начальное окно — меню с кнопками, открывающими отдельные окна"""
+
     def __init__(self):
         super().__init__()
-
-        self.setWindowTitle("📚 Books Recommender — MiniLM")
-        self.resize(1200, 800)
+        self.setWindowTitle("Books Recommender — Menu")
+        self.resize(800, 600)
 
         self.state = AppState()
 
         self._create_actions()
-        self._create_menu_and_toolbar()
-        self._create_status_bar()
-        self._create_central_layout()
+        self._create_menu()
+        self._create_status()
+        self._create_central()
         self._setup_logging()
 
-        self._auto_load_dataset()
+        # подсказка: заранее создаём подокна, но открываем только по запросу
+        self.catalog_window = CatalogWindow(self, self.state)
+        self.liked_window = LikedWindow(self, self.state)
+        self.recs_window = RecsWindow(self, self.state)
+        self.log_window = LogWindow(self, self.state, logging.getLogger())
 
-    # --------------------------
-    # Создание элементов UI
-    # --------------------------
+        self._auto_load_dataset()
 
     def _create_actions(self):
         self.act_load_dataset = QAction("Загрузить книги", self)
         self.act_load_dataset.triggered.connect(self.load_dataset)
-
         self.act_quit = QAction("Выход", self)
         self.act_quit.triggered.connect(self.close)
-
         self.act_about = QAction("О программе", self)
-        self.act_about.triggered.connect(self.show_about_dialog)
+        self.act_about.triggered.connect(self.show_about)
 
-    def _create_menu_and_toolbar(self):
+    def _create_menu(self):
         menubar = self.menuBar()
-
         file_menu = menubar.addMenu("Файл")
         file_menu.addAction(self.act_load_dataset)
         file_menu.addSeparator()
@@ -260,360 +547,152 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("Справка")
         help_menu.addAction(self.act_about)
 
-        toolbar = self.addToolBar("Main")
-        toolbar.addAction(self.act_load_dataset)
-        toolbar.addSeparator()
-        toolbar.addAction(self.act_about)
-
-    def _create_status_bar(self):
+    def _create_status(self):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage("Готово")
 
-    def _create_central_layout(self):
+    def _create_central(self):
         central = QWidget()
         self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
-        main_layout = QVBoxLayout(central)
+        title = QLabel("📚 Books Recommender — Меню")
+        f = QFont()
+        f.setPointSize(18)
+        f.setBold(True)
+        title.setFont(f)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
 
-        title_label = QLabel("📚 Books Recommender — MiniLM")
-        font = QFont()
-        font.setPointSize(16)
-        font.setBold(True)
-        title_label.setFont(font)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(title_label)
+        subtitle = QLabel("Выберите раздел приложения")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
 
-        description = QLabel(
-            "Выберите понравившиеся книги и получите персональные рекомендации.\n"
-            "Технические детали (эмбеддинги, обучение модели) выполняются автоматически."
-        )
-        description.setWordWrap(True)
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(description)
+        # Панель кнопок
+        btn_layout = QHBoxLayout()
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        main_layout.addWidget(splitter, 1)
+        self.btn_catalog = QPushButton("Просмотр каталога")
+        self.btn_catalog.clicked.connect(self.open_catalog)
+        btn_layout.addWidget(self.btn_catalog)
 
-        top_widget = QWidget()
-        top_layout = QHBoxLayout(top_widget)
-        splitter.addWidget(top_widget)
+        self.btn_liked = QPushButton("Понравившиеся книги")
+        self.btn_liked.clicked.connect(self.open_liked)
+        btn_layout.addWidget(self.btn_liked)
 
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        splitter.addWidget(bottom_widget)
+        self.btn_recs = QPushButton("Рекомендации")
+        self.btn_recs.clicked.connect(self.open_recs)
+        btn_layout.addWidget(self.btn_recs)
 
-        # Левая часть: таблица книг
-        books_group = QGroupBox("Каталог книг")
-        books_layout = QVBoxLayout(books_group)
-        self.books_table = QTableView()
-        self.books_model = BooksTableModel()
-        self.books_proxy = QSortFilterProxyModel()
-        self.books_proxy.setSourceModel(self.books_model)
-        self.books_table.setModel(self.books_proxy)
-        self.books_table.setSortingEnabled(True)
-        self.books_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.books_table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
-        books_layout.addWidget(self.books_table)
+        self.btn_log = QPushButton("Журнал действий")
+        self.btn_log.clicked.connect(self.open_log)
+        btn_layout.addWidget(self.btn_log)
 
-        top_layout.addWidget(books_group, 2)
+        layout.addLayout(btn_layout)
 
-        # Правая часть: выбор понравившихся
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        top_layout.addWidget(right_widget, 1)
+        # Полезные быстрые команды внизу
+        bottom_layout = QHBoxLayout()
+        self.btn_quick_load = QPushButton("Быстрая загрузка dataset")
+        self.btn_quick_load.clicked.connect(self.load_dataset)
+        bottom_layout.addWidget(self.btn_quick_load)
 
-        liked_group = QGroupBox("Понравившиеся книги")
-        liked_layout = QVBoxLayout(liked_group)
+        self.btn_quick_clear = QPushButton("Очистить liked")
+        self.btn_quick_clear.clicked.connect(self.clear_liked)
+        bottom_layout.addWidget(self.btn_quick_clear)
 
-        search_layout = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Начните вводить название книги...")
-        search_layout.addWidget(self.search_edit)
-
-        self.btn_add_search = QPushButton("Добавить")
-        self.btn_add_search.clicked.connect(self.add_book_from_search)
-        search_layout.addWidget(self.btn_add_search)
-
-        liked_layout.addLayout(search_layout)
-
-        self.liked_list = QListWidget()
-        liked_layout.addWidget(self.liked_list)
-
-        btns_layout = QHBoxLayout()
-        self.btn_remove_selected = QPushButton("Удалить выбранные")
-        self.btn_remove_selected.clicked.connect(self.remove_selected_liked)
-        btns_layout.addWidget(self.btn_remove_selected)
-
-        self.btn_clear_liked = QPushButton("Очистить список")
-        self.btn_clear_liked.clicked.connect(self.clear_liked)
-        btns_layout.addWidget(self.btn_clear_liked)
-
-        liked_layout.addLayout(btns_layout)
-
-        liked_group.setLayout(liked_layout)
-        right_layout.addWidget(liked_group)
-
-        # Параметр Top-K
-        topk_layout = QHBoxLayout()
-        lbl_topk = QLabel("Количество рекомендаций (Top-K):")
-        topk_layout.addWidget(lbl_topk)
-        self.spin_topk = QSpinBox()
-        self.spin_topk.setRange(1, 100)
-        self.spin_topk.setValue(self.state.top_k)
-        self.spin_topk.valueChanged.connect(self.on_topk_changed)
-        topk_layout.addWidget(self.spin_topk)
-        right_layout.addLayout(topk_layout)
-
-        # Кнопка рекомендаций
-        self.btn_recommend = QPushButton("Получить рекомендации")
-        self.btn_recommend.clicked.connect(self.get_recommendations)
-        self.btn_recommend.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        right_layout.addWidget(self.btn_recommend)
-
-        # Нижняя часть: рекомендации + лог
-        rec_and_log_splitter = QSplitter(Qt.Orientation.Horizontal)
-        bottom_layout.addWidget(rec_and_log_splitter)
-
-        rec_group = QGroupBox("Рекомендованные книги")
-        rec_layout = QVBoxLayout(rec_group)
-        self.recs_table = QTableView()
-        self.recs_model = BooksTableModel()
-        self.recs_proxy = QSortFilterProxyModel()
-        self.recs_proxy.setSourceModel(self.recs_model)
-        self.recs_table.setModel(self.recs_proxy)
-        self.recs_table.setSortingEnabled(True)
-        self.recs_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        rec_layout.addWidget(self.recs_table)
-        rec_group.setLayout(rec_layout)
-        rec_and_log_splitter.addWidget(rec_group)
-
-        log_group = QGroupBox("Журнал действий")
-        log_layout = QVBoxLayout(log_group)
-        self.log_edit = QTextEdit()
-        self.log_edit.setReadOnly(True)
-        log_layout.addWidget(self.log_edit)
-        log_group.setLayout(log_layout)
-        rec_and_log_splitter.addWidget(log_group)
+        layout.addLayout(bottom_layout)
 
     def _setup_logging(self):
-        class QtLogHandler(logging.Handler):
-            def __init__(self, text_widget: QTextEdit):
+        class QtHandler(logging.Handler):
+            def __init__(self, status_bar: QStatusBar):
                 super().__init__()
-                self.text_widget = text_widget
+                self.status_bar = status_bar
 
             def emit(self, record):
                 msg = self.format(record)
-                self.text_widget.append(msg)
-                self.text_widget.verticalScrollBar().setValue(
-                    self.text_widget.verticalScrollBar().maximum()
-                )
+                # показываем краткие сообщения в строке состояния
+                self.status_bar.showMessage(msg, 4000)
 
-        handler = QtLogHandler(self.log_edit)
+        handler = QtHandler(self.status)
         handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
 
-    # --------------------------
-    # Логика работы
-    # --------------------------
-
     def log(self, msg: str):
         logging.info(msg)
-        self.status.showMessage(msg, 5000)
-
-    def show_about_dialog(self):
-        text = (
-            "<b>Books Recommender — MiniLM</b><br><br>"
-            "Приложение для персональных рекомендаций книг.<br>"
-            "Вы выбираете понравившиеся книги, модель автоматически вычисляет эмбеддинги, "
-            "обучается и выдаёт список рекомендаций."
-        )
-        QMessageBox.information(self, "О программе", text)
 
     def _auto_load_dataset(self):
-        """
-        Автоматически загружает датасет, если файл существует.
-        Пользователь может также вручную вызвать через меню/кнопку.
-        """
         if os.path.exists(DATA_PATH):
             try:
                 self.load_dataset()
             except Exception as e:
-                self.log(f"Не удалось автоматически загрузить dataset: {e}")
-
-    # --------------------------
-    # Загрузка датасета
-    # --------------------------
+                self.log(f"Авто-загрузка не удалась: {e}")
 
     def load_dataset(self):
         if not os.path.exists(DATA_PATH):
-            QMessageBox.warning(
-                self,
-                "Файл не найден",
-                f"Файл {DATA_PATH} не найден.\n"
-                "Положите books.csv в папку data/ и запустите снова.",
-            )
-            self.log("Файл books.csv не найден")
-            return
+            # prompt for file if not present
+            path, _ = QFileDialog.getOpenFileName(self, "Открыть CSV", "", "CSV files (*.csv)")
+            if not path:
+                QMessageBox.warning(self, "Файл не найден", f"Файл {DATA_PATH} не найден и не выбран.")
+                return
+            else:
+                chosen = path
+        else:
+            chosen = DATA_PATH
 
         try:
-            df = load_books_dataset(DATA_PATH)
+            df = load_books_dataset(chosen)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить dataset:\n{e}")
-            self.log(f"Ошибка загрузки dataset: {e}")
             return
-
         self.state.df = df
-        self.state.title2idx = {
-            row["Book"]: idx for idx, row in df.reset_index(drop=True).iterrows()
-        }
+        self.state.title2idx = {row["Book"]: idx for idx, row in df.reset_index(drop=True).iterrows()}
+        self.log(f"Загружен dataset: {len(df)} записей")
 
-        self.books_model.set_dataframe(df)
-        self.books_table.resizeColumnsToContents()
+        # обновим данные в подокнах
+        self.catalog_window.books_model.set_dataframe(df)
+        self.catalog_window.table.resizeColumnsToContents()
 
-        # --- НАСТРОЙКА АВТОДОПОЛНЕНИЯ ---
-
-        # 1. Список названий книг
+        # создаём комплитер для окна liked
         titles = df["Book"].astype(str).tolist()
+        self.catalog_window.table.resizeColumnsToContents()
+        completer = QCompleter(titles, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        self.liked_window.search_edit.setCompleter(completer)
 
-        # 2. Создаём комплитер прямо из списка строк
-        self.completer = QCompleter(titles, self)
-        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        # режим: показывать popup с вариантами
-        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        # предлагать только книги, НАЧИНАЮЩИЕСЯ с введённого текста
-        self.completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+    def open_catalog(self):
+        self.catalog_window.refresh()
+        self.catalog_window.exec()
 
-        # 3. Назначаем комплитер полю ввода
-        self.search_edit.setCompleter(self.completer)
+    def open_liked(self):
+        self.liked_window.refresh_ui()
+        self.liked_window.exec()
 
-        self.log(f"Загружен dataset: {len(df)} книг")
+    def open_recs(self):
+        self.recs_window.spin_topk.setValue(self.state.top_k)
+        self.recs_window.exec()
 
-
-    # --------------------------
-    # Выбор понравившихся
-    # --------------------------
-
-    def add_book_from_search(self):
-        if self.state.df is None:
-            QMessageBox.warning(self, "Нет данных", "Сначала загрузите список книг.")
-            return
-
-        title = self.search_edit.text().strip()
-        if not title:
-            return
-
-        if title not in self.state.df["Book"].values:
-            QMessageBox.warning(
-                self,
-                "Книга не найдена",
-                "Книга с таким названием отсутствует в датасете.",
-            )
-            return
-
-        if title in self.state.liked_books:
-            QMessageBox.information(
-                self,
-                "Уже добавлена",
-                "Эта книга уже есть в списке понравившихся.",
-            )
-            return
-
-        self.state.liked_books.append(title)
-        item = QListWidgetItem(title)
-        self.liked_list.addItem(item)
-        self.search_edit.clear()
-        self.log(f"Добавлена понравившаяся книга: {title}")
-
-    def remove_selected_liked(self):
-        selected_items = self.liked_list.selectedItems()
-        if not selected_items:
-            return
-        for item in selected_items:
-            title = item.text()
-            if title in self.state.liked_books:
-                self.state.liked_books.remove(title)
-            row = self.liked_list.row(item)
-            self.liked_list.takeItem(row)
-            self.log(f"Удалена из понравившихся: {title}")
+    def open_log(self):
+        self.log_window.exec()
 
     def clear_liked(self):
         self.state.liked_books.clear()
-        self.liked_list.clear()
-        self.log("Список понравившихся очищен")
+        QMessageBox.information(self, "Очистка", "Список понравившихся очищен")
 
-    def on_topk_changed(self, value: int):
-        self.state.top_k = value
-        self.log(f"Top-K изменён на {value}")
-
-    # --------------------------
-    # Получение рекомендаций
-    # --------------------------
-
-    def get_recommendations(self):
-        if self.state.df is None:
-            QMessageBox.warning(self, "Нет данных", "Сначала загрузите список книг.")
-            return
-
-        if not self.state.liked_books:
-            QMessageBox.warning(
-                self,
-                "Нет понравившихся",
-                "Выберите как минимум одну понравившуюся книгу.",
-            )
-            return
-
-        self.log("Запуск процесса генерации рекомендаций...")
-        self.status.showMessage("Получение рекомендаций, подождите...")
-
-        self.btn_recommend.setEnabled(False)
-
-        self.worker = BackendWorker(self.state)
-        self.worker.finished_with_recs.connect(self.on_recommendations_ready)
-        self.worker.start()
-
-    def on_recommendations_ready(self, recs: Any, error: str):
-        self.btn_recommend.setEnabled(True)
-        if error:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось получить рекомендации:\n{error}")
-            self.log(f"Ошибка рекомендаций: {error}")
-            self.status.showMessage("Ошибка при получении рекомендаций")
-            return
-
-        if recs is None or len(recs) == 0:
-            QMessageBox.information(
-                self,
-                "Нет рекомендаций",
-                "Не удалось подобрать подходящие рекомендации.",
-            )
-            self.log("Сервис не вернул рекомендаций")
-            self.status.showMessage("Рекомендаций нет")
-            return
-
-        # recs — список словарей; сделаем DataFrame и отобразим
-        try:
-            df_recs = pd.DataFrame(recs)
-        except Exception:
-            df_recs = pd.DataFrame(recs)
-
-        self.recs_model.set_dataframe(df_recs)
-        self.recs_table.resizeColumnsToContents()
-
-        self.log(f"Получено рекомендаций: {len(df_recs)}")
-        self.status.showMessage("Рекомендации получены")
-
-    # --------------------------
-    # Закрытие приложения
-    # --------------------------
+    def show_about(self):
+        QMessageBox.information(
+            self,
+            "О программе",
+            (
+                "<b>Books Recommender — MiniLM</b><br><br>"
+                "Приложение для персональных рекомендаций книг.\n"
+                "Выберите понравившиеся книги, и система выдаст рекомендации."
+            ),
+        )
 
     def closeEvent(self, event: QCloseEvent):
-        reply = QMessageBox.question(
-            self,
-            "Выход",
-            "Закрыть приложение?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
+        reply = QMessageBox.question(self, "Выход", "Закрыть приложение?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             event.accept()
         else:
@@ -626,11 +705,11 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Books Recommender (MiniLM)")
+    app.setApplicationName("Books Recommender")
 
     os.makedirs("data", exist_ok=True)
 
-    window = MainWindow()
+    window = MainMenuWindow()
     window.show()
 
     sys.exit(app.exec())
@@ -638,3 +717,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
